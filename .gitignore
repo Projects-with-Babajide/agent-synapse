@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.js.map
+
+# Synapse data directory (local to each user)
+.claude-synapse/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

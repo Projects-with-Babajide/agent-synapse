@@ -1,0 +1,44 @@
+{
+  "name": "claude-synapse",
+  "version": "0.1.0",
+  "description": "Cross-project messaging between Claude Code sessions via named agents",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "claude-synapse": "./dist/cli.js"
+  },
+  "main": "./dist/channel.js",
+  "files": [
+    "dist",
+    ".claude-plugin",
+    ".mcp.json"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev:channel": "tsx src/channel.ts",
+    "dev:broker": "tsx src/broker.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "mcp",
+    "agent",
+    "messaging",
+    "channel"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/babajideokusanya/claude-synapse.git"
+  }
+}
