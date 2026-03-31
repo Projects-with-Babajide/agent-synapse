@@ -11,6 +11,7 @@ import {
   getDataDir,
   getBrokerPid,
   removePidFile,
+  installStatusLine,
 } from "./config.js";
 import { DEFAULT_PORT, DEFAULT_HOST } from "./types.js";
 
@@ -63,7 +64,11 @@ async function setup(): Promise<void> {
   console.log("     SYNAPSE_AGENT_NAME=backend claude --dangerously-load-development-channels server:synapse\n");
   console.log("  2. In another terminal:");
   console.log("     SYNAPSE_AGENT_NAME=frontend claude --dangerously-load-development-channels server:synapse\n");
-  console.log("  The broker starts automatically when the first agent connects.");
+  console.log("  The broker starts automatically when the first agent connects.\n");
+
+  // Install status line
+  const statusResult = installStatusLine();
+  console.log(`  Status line: ${statusResult.message}`);
 }
 
 async function brokerStart(): Promise<void> {

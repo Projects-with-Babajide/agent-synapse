@@ -145,6 +145,14 @@ export function startBroker(): void {
       return;
     }
 
+    // --- GET /pending/:name (no auth — used by status line script) ---
+    if (method === "GET" && pathname.startsWith("/pending/")) {
+      const agentName = pathname.slice("/pending/".length);
+      const count = queues.get(agentName)?.length ?? 0;
+      json(res, 200, { agent: agentName, pending: count });
+      return;
+    }
+
     // --- GET /stream/:name ---
     if (method === "GET" && pathname.startsWith("/stream/")) {
       if (!validateToken(token, config.token)) {

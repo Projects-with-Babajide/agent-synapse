@@ -88,3 +88,113 @@ export function removePidFile(): void {
     fs.unlinkSync(PID_FILE);
   }
 }
+
+// --- Status line ---
+
+const CLAUDE_SETTINGS_PATH = path.join(
+  process.env.HOME!,
+  ".claude",
+  "settings.json"
+);
+
+const SYNAPSE_STATUS_LINE_SCRIPT = path.join(DATA_DIR, "statusline.sh");
+
+function synapseBadge(): string {
+  // Shared snippet: query broker for pending count + format the badge
+  return `
+  agent="$SYNAPSE_AGENT_NAME"
+  badge="$agent"
+  # Check for pending messages (fast localhost call, timeout 1s)
+  pending=$(curl -s --max-time 1 "http://127.0.0.1:${DEFAULT_PORT}/pending/$agent" 2>/dev/null | jq -r '.pending // 0')
+  if [ "$pending" != "0" ] && [ -n "$pending" ]; then
+    badge="$agent ($pending)"
+  fi`;
+}
+
+function buildStatusLineScript(existingCommand: string | null): string {
+  // If there's an existing status line command, run it first and append synapse info
+  if (existingCommand) {
+    // Save the original command to a separate script so it runs cleanly
+    const originalScriptPath = path.join(DATA_DIR, "statusline-original.sh");
+    fs.writeFileSync(
+      originalScriptPath,
+      `#!/bin/bash\n${existingCommand}\n`,
+      { mode: 0o755 }
+    );
+
+    return `#!/bin/bash
+input=$(cat)
+# Run the original status line command
+existing=$(echo "$input" | ${originalScriptPath})
+# Append synapse agent name if set
+if [ -n "$SYNAPSE_AGENT_NAME" ]; then
+${synapseBadge()}
+  printf '%s [synapse: %s]' "$existing" "$badge"
+else
+  printf '%s' "$existing"
+fi
+`;
+  }
+
+  // No existing status line — show folder name + synapse info
+  return `#!/bin/bash
+input=$(cat)
+dir=$(echo "$input" | jq -r '.cwd')
+name=$(basename "$dir")
+if [ -n "$SYNAPSE_AGENT_NAME" ]; then
+${synapseBadge()}
+  printf ' %s [synapse: %s]' "$name" "$badge"
+else
+  printf ' %s' "$name"
+fi
+`;
+}
+
+export function installStatusLine(): { installed: boolean; message: string } {
+  // Read existing Claude settings
+  let settings: Record<string, unknown> = {};
+  if (fs.existsSync(CLAUDE_SETTINGS_PATH)) {
+    settings = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS_PATH, "utf-8"));
+  }
+
+  const currentStatusLine = settings.statusLine as
+    | { type?: string; command?: string }
+    | undefined;
+
+  // If already pointing to our script, skip
+  if (currentStatusLine?.command?.includes(SYNAPSE_STATUS_LINE_SCRIPT)) {
+    return { installed: false, message: "Status line already configured" };
+  }
+
+  // Build script that wraps the existing command (if any)
+  const existingCommand = currentStatusLine?.command ?? null;
+  const script = buildStatusLineScript(existingCommand);
+
+  // Write the status line script
+  fs.writeFileSync(SYNAPSE_STATUS_LINE_SCRIPT, script, { mode: 0o755 });
+
+  // Back up the existing status line config
+  if (currentStatusLine) {
+    const backupPath = path.join(DATA_DIR, "statusline-backup.json");
+    fs.writeFileSync(
+      backupPath,
+      JSON.stringify({ statusLine: currentStatusLine }, null, 2),
+      { mode: 0o600 }
+    );
+  }
+
+  // Update settings to use our wrapper script
+  settings.statusLine = {
+    type: "command",
+    command: SYNAPSE_STATUS_LINE_SCRIPT,
+  };
+
+  fs.writeFileSync(CLAUDE_SETTINGS_PATH, JSON.stringify(settings, null, 2));
+
+  return {
+    installed: true,
+    message: existingCommand
+      ? "Status line updated (wraps your existing status line, backup at ~/.claude-synapse/statusline-backup.json)"
+      : "Status line configured",
+  };
+}
