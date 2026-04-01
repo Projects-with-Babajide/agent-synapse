@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { DEFAULT_PORT, DEFAULT_HOST } from "./types.js";
 import type { BrokerConfig } from "./types.js";
 
@@ -148,6 +149,32 @@ else
   printf ' %s' "$name"
 fi
 `;
+}
+
+export function installMcpServer(): { installed: boolean; message: string } {
+  let settings: Record<string, unknown> = {};
+  if (fs.existsSync(CLAUDE_SETTINGS_PATH)) {
+    settings = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS_PATH, "utf-8"));
+  }
+
+  const mcpServers = (settings.mcpServers ?? {}) as Record<string, unknown>;
+
+  if (mcpServers.synapse) {
+    return { installed: false, message: "MCP server already registered" };
+  }
+
+  // Use absolute path to the compiled channel.js
+  const channelPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "channel.js");
+
+  mcpServers.synapse = {
+    command: "node",
+    args: [channelPath],
+  };
+  settings.mcpServers = mcpServers;
+
+  fs.writeFileSync(CLAUDE_SETTINGS_PATH, JSON.stringify(settings, null, 2));
+
+  return { installed: true, message: "MCP server registered globally" };
 }
 
 export function installStatusLine(): { installed: boolean; message: string } {

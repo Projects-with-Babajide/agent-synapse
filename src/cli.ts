@@ -12,6 +12,7 @@ import {
   getBrokerPid,
   removePidFile,
   installStatusLine,
+  installMcpServer,
 } from "./config.js";
 import { DEFAULT_PORT, DEFAULT_HOST } from "./types.js";
 
@@ -60,11 +61,15 @@ async function setup(): Promise<void> {
   console.log(`  Broker: ${config.host}:${config.port}`);
   console.log(`  Token: ${token.slice(0, 8)}...\n`);
   console.log("Next steps:\n");
-  console.log("  1. Start Claude Code with the Synapse channel:");
-  console.log("     SYNAPSE_AGENT_NAME=backend claude --dangerously-load-development-channels server:synapse\n");
+  console.log("  1. Start Claude Code as a named agent:");
+  console.log("     SYNAPSE_AGENT_NAME=backend claude\n");
   console.log("  2. In another terminal:");
-  console.log("     SYNAPSE_AGENT_NAME=frontend claude --dangerously-load-development-channels server:synapse\n");
+  console.log("     SYNAPSE_AGENT_NAME=frontend claude\n");
   console.log("  The broker starts automatically when the first agent connects.\n");
+
+  // Register MCP server globally
+  const mcpResult = installMcpServer();
+  console.log(`  MCP server: ${mcpResult.message}`);
 
   // Install status line
   const statusResult = installStatusLine();
