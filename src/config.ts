@@ -151,13 +151,15 @@ fi
 `;
 }
 
+const CLAUDE_JSON_PATH = path.join(process.env.HOME!, ".claude.json");
+
 export function installMcpServer(): { installed: boolean; message: string } {
-  let settings: Record<string, unknown> = {};
-  if (fs.existsSync(CLAUDE_SETTINGS_PATH)) {
-    settings = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS_PATH, "utf-8"));
+  let config: Record<string, unknown> = {};
+  if (fs.existsSync(CLAUDE_JSON_PATH)) {
+    config = JSON.parse(fs.readFileSync(CLAUDE_JSON_PATH, "utf-8"));
   }
 
-  const mcpServers = (settings.mcpServers ?? {}) as Record<string, unknown>;
+  const mcpServers = (config.mcpServers ?? {}) as Record<string, unknown>;
 
   if (mcpServers.synapse) {
     return { installed: false, message: "MCP server already registered" };
@@ -167,12 +169,16 @@ export function installMcpServer(): { installed: boolean; message: string } {
   const channelPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "channel.js");
 
   mcpServers.synapse = {
+    type: "stdio",
     command: "node",
     args: [channelPath],
+    env: {
+      SYNAPSE_AGENT_NAME: "${SYNAPSE_AGENT_NAME}",
+    },
   };
-  settings.mcpServers = mcpServers;
+  config.mcpServers = mcpServers;
 
-  fs.writeFileSync(CLAUDE_SETTINGS_PATH, JSON.stringify(settings, null, 2));
+  fs.writeFileSync(CLAUDE_JSON_PATH, JSON.stringify(config, null, 2));
 
   return { installed: true, message: "MCP server registered globally" };
 }

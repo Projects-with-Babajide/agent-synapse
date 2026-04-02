@@ -121,40 +121,47 @@ function connectSSE(
   const url = `${brokerUrl(config, `/stream/${agentName}`)}?token=${config.token}`;
 
   function connect() {
-    http
-      .get(url, (res) => {
-        let buffer = "";
+    const req = http.get(url, (res) => {
+      // Disable timeout on the response socket — SSE connections are long-lived
+      res.socket?.setTimeout(0);
+      res.socket?.setKeepAlive(true);
 
-        res.on("data", (chunk: Buffer) => {
-          buffer += chunk.toString();
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
+      let buffer = "";
 
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              try {
-                const message = JSON.parse(line.slice(6)) as SynapseMessage;
-                onMessage(message);
-              } catch {
-                // Skip malformed messages
-              }
+      res.on("data", (chunk: Buffer) => {
+        buffer += chunk.toString();
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const message = JSON.parse(line.slice(6)) as SynapseMessage;
+              onMessage(message);
+            } catch {
+              // Skip malformed messages
             }
           }
-        });
-
-        res.on("end", () => {
-          // Reconnect after a delay
-          setTimeout(connect, 2000);
-        });
-
-        res.on("error", () => {
-          setTimeout(connect, 2000);
-        });
-      })
-      .on("error", () => {
-        // Broker might be down, retry
-        setTimeout(connect, 5000);
+        }
       });
+
+      res.on("end", () => {
+        // Reconnect after a delay
+        setTimeout(connect, 2000);
+      });
+
+      res.on("error", () => {
+        setTimeout(connect, 2000);
+      });
+    });
+
+    // Disable timeout on the request itself
+    req.setTimeout(0);
+
+    req.on("error", () => {
+      // Broker might be down, retry
+      setTimeout(connect, 5000);
+    });
   }
 
   connect();
@@ -171,7 +178,8 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const agentName = resolveAgentName();
+  let agentName = resolveAgentName();
+  let sseAbort: (() => void) | null = null;
 
   // Auto-start broker if needed
   await ensureBroker(config);
@@ -192,13 +200,54 @@ async function main(): Promise<void> {
         `Messages from other Claude Code agents arrive as <channel source="synapse" from="agent-name"> tags.`,
         "Use the send_message tool to send messages to other agents.",
         "Use the list_agents tool to see who is connected.",
+        "If not registered yet, use register_agent to set your agent name.",
       ].join(" "),
     }
   );
 
+  // Helper to start/restart SSE listener
+  function startSSE(name: string) {
+    if (sseAbort) sseAbort();
+    const abortController = { aborted: false };
+    sseAbort = () => { abortController.aborted = true; };
+    connectSSE(config!, name, async (msg) => {
+      if (abortController.aborted) return;
+      try {
+        await mcp.notification({
+          method: "notifications/claude/channel",
+          params: {
+            content: msg.content,
+            meta: {
+              from: msg.from,
+              timestamp: msg.timestamp,
+            },
+          },
+        });
+      } catch {
+        // If notification fails, message is lost — acceptable for v1
+      }
+    });
+  }
+
   // Tools
   mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
+      {
+        name: "register_agent",
+        description:
+          "Register this session as a named Synapse agent. Use this if SYNAPSE_AGENT_NAME was not set when starting the session.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            name: {
+              type: "string",
+              description:
+                "Agent name (e.g. 'backend', 'frontend', 'cerebro-backend')",
+            },
+          },
+          required: ["name"],
+        },
+      },
       {
         name: "send_message",
         description: "Send a message to another Claude Code agent",
@@ -230,6 +279,33 @@ async function main(): Promise<void> {
 
   mcp.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+
+    if (name === "register_agent") {
+      const newName = (args as Record<string, string>).name;
+      try {
+        await brokerPost(config, "/register", { name: newName });
+        agentName = newName;
+        // Reconnect SSE with new name
+        startSSE(newName);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Registered as "${newName}". Now listening for messages.`,
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Failed to register: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+        };
+      }
+    }
 
     if (name === "send_message") {
       const to = (args as Record<string, string>).to;
@@ -314,24 +390,6 @@ async function main(): Promise<void> {
     return {
       content: [{ type: "text" as const, text: `Unknown tool: ${name}` }],
     };
-  });
-
-  // Connect SSE to receive messages and push them into Claude
-  connectSSE(config, agentName, async (msg) => {
-    try {
-      await mcp.notification({
-        method: "notifications/claude/channel",
-        params: {
-          content: msg.content,
-          meta: {
-            from: msg.from,
-            timestamp: msg.timestamp,
-          },
-        },
-      });
-    } catch {
-      // If notification fails, message is lost — acceptable for v1
-    }
   });
 
   // Connect to Claude Code via stdio
