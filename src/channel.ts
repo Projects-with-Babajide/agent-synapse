@@ -114,14 +114,31 @@ async function ensureBroker(config: BrokerConfig): Promise<void> {
 // --- SSE listener ---
 
 function connectSSE(
-  config: BrokerConfig,
+  getConfig: () => BrokerConfig,
   agentName: string,
   onMessage: (msg: SynapseMessage) => void
 ): void {
-  const url = `${brokerUrl(config, `/stream/${agentName}`)}?token=${config.token}`;
-
   function connect() {
+    // Re-read config each time we connect — token may have changed
+    const config = getConfig();
+    const url = `${brokerUrl(config, `/stream/${agentName}`)}?token=${config.token}`;
+
     const req = http.get(url, (res) => {
+      // Auth failure — config may have changed, re-register and retry
+      if (res.statusCode === 401) {
+        res.resume();
+        setTimeout(async () => {
+          try {
+            const freshConfig = getConfig();
+            await brokerPost(freshConfig, "/register", { name: agentName });
+          } catch {
+            // Broker might be down
+          }
+          connect();
+        }, 2000);
+        return;
+      }
+
       // Disable timeout on the response socket — SSE connections are long-lived
       res.socket?.setTimeout(0);
       res.socket?.setKeepAlive(true);
@@ -197,9 +214,10 @@ async function main(): Promise<void> {
       },
       instructions: [
         `You are connected to Synapse as agent "${agentName}".`,
-        `Messages from other Claude Code agents arrive as <channel source="synapse" from="agent-name"> tags.`,
-        "Use the send_message tool to send messages to other agents.",
-        "Use the list_agents tool to see who is connected.",
+        "When you see a '[Synapse: N pending message(s)]' notice, immediately call check_messages to retrieve them.",
+        "Use send_message to send messages to other agents.",
+        "Use list_agents to see who is connected.",
+        "Use check_messages to pull pending messages from other agents.",
         "If not registered yet, use register_agent to set your agent name.",
       ].join(" "),
     }
@@ -210,7 +228,7 @@ async function main(): Promise<void> {
     if (sseAbort) sseAbort();
     const abortController = { aborted: false };
     sseAbort = () => { abortController.aborted = true; };
-    connectSSE(config!, name, async (msg) => {
+    connectSSE(() => getConfig()!, name, async (msg) => {
       if (abortController.aborted) return;
       try {
         await mcp.notification({
@@ -264,6 +282,15 @@ async function main(): Promise<void> {
             },
           },
           required: ["to", "content"],
+        },
+      },
+      {
+        name: "check_messages",
+        description:
+          "Check for and retrieve pending messages from other agents. Call this regularly or when prompted by the hook.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {},
         },
       },
       {
@@ -352,6 +379,42 @@ async function main(): Promise<void> {
       }
     }
 
+    if (name === "check_messages") {
+      try {
+        const { data } = await brokerGet(config, `/drain/${agentName}`);
+        const result = data as {
+          messages: Array<{ from: string; content: string; timestamp: string }>;
+        };
+
+        if (!result.messages || result.messages.length === 0) {
+          return {
+            content: [{ type: "text" as const, text: "No pending messages." }],
+          };
+        }
+
+        const formatted = result.messages
+          .map((m) => `[From ${m.from} at ${m.timestamp}]\n${m.content}`)
+          .join("\n\n---\n\n");
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `${result.messages.length} message(s) received:\n\n${formatted}`,
+            },
+          ],
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Error checking messages: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+        };
+      }
+    }
+
     if (name === "list_agents") {
       try {
         const { data } = await brokerGet(config, "/agents");
@@ -391,6 +454,9 @@ async function main(): Promise<void> {
       content: [{ type: "text" as const, text: `Unknown tool: ${name}` }],
     };
   });
+
+  // Start listening for messages via SSE
+  startSSE(agentName);
 
   // Connect to Claude Code via stdio
   const transport = new StdioServerTransport();

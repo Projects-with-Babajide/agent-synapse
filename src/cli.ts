@@ -13,6 +13,7 @@ import {
   removePidFile,
   installStatusLine,
   installMcpServer,
+  installHook,
 } from "./config.js";
 import { DEFAULT_PORT, DEFAULT_HOST } from "./types.js";
 
@@ -70,6 +71,10 @@ async function setup(): Promise<void> {
   // Register MCP server globally
   const mcpResult = installMcpServer();
   console.log(`  MCP server: ${mcpResult.message}`);
+
+  // Install hook for auto-checking messages
+  const hookResult = installHook();
+  console.log(`  Hook: ${hookResult.message}`);
 
   // Install status line
   const statusResult = installStatusLine();

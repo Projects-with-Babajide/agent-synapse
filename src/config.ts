@@ -231,3 +231,65 @@ export function installStatusLine(): { installed: boolean; message: string } {
       : "Status line configured",
   };
 }
+
+// --- PostToolUse hook ---
+
+const SYNAPSE_HOOK_SCRIPT = path.join(DATA_DIR, "check-hook.sh");
+
+export function installHook(): { installed: boolean; message: string } {
+  // Write the hook script — checks pending count silently
+  const hookScript = `#!/bin/bash
+# Only run if SYNAPSE_AGENT_NAME is set
+[ -z "$SYNAPSE_AGENT_NAME" ] && exit 0
+
+# Quick check for pending messages (1s timeout)
+pending=$(curl -s --max-time 1 "http://127.0.0.1:${DEFAULT_PORT}/pending/$SYNAPSE_AGENT_NAME" 2>/dev/null | jq -r '.pending // 0')
+
+if [ "$pending" != "0" ] && [ -n "$pending" ]; then
+  echo "[Synapse: $pending pending message(s) for $SYNAPSE_AGENT_NAME — use check_messages to read them]"
+fi
+exit 0
+`;
+
+  fs.writeFileSync(SYNAPSE_HOOK_SCRIPT, hookScript, { mode: 0o755 });
+
+  // Add hook to settings.json
+  let settings: Record<string, unknown> = {};
+  if (fs.existsSync(CLAUDE_SETTINGS_PATH)) {
+    settings = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS_PATH, "utf-8"));
+  }
+
+  const hooks = (settings.hooks ?? {}) as Record<string, unknown[]>;
+  const postToolUse = (hooks.PostToolUse ?? []) as Array<Record<string, unknown>>;
+
+  // Check if our hook is already installed
+  const alreadyInstalled = postToolUse.some(
+    (h) => {
+      const hookEntries = h.hooks as Array<Record<string, unknown>> | undefined;
+      return hookEntries?.some(
+        (entry) => typeof entry.command === "string" && entry.command.includes("check-hook.sh")
+      );
+    }
+  );
+
+  if (alreadyInstalled) {
+    return { installed: false, message: "Hook already configured" };
+  }
+
+  postToolUse.push({
+    matcher: ".*",
+    hooks: [
+      {
+        type: "command",
+        command: SYNAPSE_HOOK_SCRIPT,
+      },
+    ],
+  });
+
+  hooks.PostToolUse = postToolUse;
+  settings.hooks = hooks;
+
+  fs.writeFileSync(CLAUDE_SETTINGS_PATH, JSON.stringify(settings, null, 2));
+
+  return { installed: true, message: "PostToolUse hook installed" };
+}

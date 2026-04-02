@@ -153,6 +153,20 @@ export function startBroker(): void {
       return;
     }
 
+    // --- GET /drain/:name — return and clear queued messages ---
+    if (method === "GET" && pathname.startsWith("/drain/")) {
+      if (!validateToken(token, config.token)) {
+        json(res, 401, { error: "Invalid token" });
+        return;
+      }
+      const agentName = pathname.slice("/drain/".length);
+      const messages = queues.get(agentName) ?? [];
+      queues.delete(agentName);
+      if (messages.length > 0) persistQueues();
+      json(res, 200, { agent: agentName, messages });
+      return;
+    }
+
     // --- GET /stream/:name ---
     if (method === "GET" && pathname.startsWith("/stream/")) {
       if (!validateToken(token, config.token)) {
