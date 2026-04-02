@@ -1,5 +1,7 @@
 import http from "node:http";
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   DEFAULT_PORT,
   DEFAULT_HOST,
@@ -353,7 +355,7 @@ export function startBroker(): void {
     });
 
     // Force exit after 5 seconds
-    setTimeout(() => process.exit(0), 5000);
+    setTimeout(() => process.exit(0), 5000).unref();
   }
 
   process.on("SIGTERM", shutdown);
@@ -361,10 +363,10 @@ export function startBroker(): void {
 }
 
 // Run directly if this is the entry point
-const isDirectRun =
-  process.argv[1]?.endsWith("broker.js") ||
-  process.argv[1]?.endsWith("broker.ts");
-
-if (isDirectRun) {
+const resolvedEntry = process.argv[1]
+  ? path.resolve(process.argv[1])
+  : "";
+const thisFile = fileURLToPath(import.meta.url);
+if (resolvedEntry === thisFile || resolvedEntry === thisFile.replace(/\.ts$/, ".js")) {
   startBroker();
 }

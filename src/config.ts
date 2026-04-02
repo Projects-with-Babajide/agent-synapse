@@ -1,14 +1,23 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_PORT, DEFAULT_HOST } from "./types.js";
+import { DEFAULT_PORT, DEFAULT_HOST, HTTP_TIMEOUT_MS } from "./types.js";
 import type { BrokerConfig } from "./types.js";
 
-const DATA_DIR = path.join(process.env.HOME!, ".claude-synapse");
+const HOME = os.homedir();
+const DATA_DIR = path.join(HOME, ".claude-synapse");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 const PID_FILE = path.join(DATA_DIR, "broker.pid");
 const QUEUES_FILE = path.join(DATA_DIR, "queues.jsonl");
+const CLAUDE_SETTINGS_PATH = path.join(HOME, ".claude", "settings.json");
+const CLAUDE_JSON_PATH = path.join(HOME, ".claude.json");
+const SYNAPSE_STATUS_LINE_SCRIPT = path.join(DATA_DIR, "statusline.sh");
+const SYNAPSE_HOOK_SCRIPT = path.join(DATA_DIR, "check-hook.sh");
+
+// --- Data dir and paths ---
 
 export function getDataDir(): string {
   return DATA_DIR;
@@ -32,6 +41,8 @@ export function ensureDataDir(): void {
   }
 }
 
+// --- Config ---
+
 export function generateToken(): string {
   return crypto.randomBytes(32).toString("hex");
 }
@@ -49,11 +60,15 @@ export function saveConfig(config: BrokerConfig): void {
   });
 }
 
+// --- Agent name validation ---
+
 const VALID_AGENT_NAME = /^[a-zA-Z0-9_-]+$/;
 
 export function sanitizeAgentName(name: string): string {
-  // Strip any characters that aren't alphanumeric, hyphens, or underscores
-  const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  const sanitized = name
+    .replace(/[^a-zA-Z0-9_-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
   return sanitized || "agent";
 }
 
@@ -62,7 +77,6 @@ export function isValidAgentName(name: string): boolean {
 }
 
 export function resolveAgentName(): string {
-  // Priority: env var → CLI --name arg → folder name
   let name: string;
 
   if (process.env.SYNAPSE_AGENT_NAME) {
@@ -76,20 +90,26 @@ export function resolveAgentName(): string {
     }
   }
 
-  return sanitizeAgentName(name);
+  const sanitized = sanitizeAgentName(name);
+  if (sanitized !== name) {
+    console.error(
+      `[synapse] Agent name sanitized: "${name}" → "${sanitized}"`
+    );
+  }
+  return sanitized;
 }
+
+// --- PID management ---
 
 export function getBrokerPid(): number | null {
   if (!fs.existsSync(PID_FILE)) return null;
   const pid = parseInt(fs.readFileSync(PID_FILE, "utf-8").trim(), 10);
   if (isNaN(pid)) return null;
 
-  // Check if process is still running
   try {
     process.kill(pid, 0);
     return pid;
   } catch {
-    // Process not running, clean up stale PID file
     fs.unlinkSync(PID_FILE);
     return null;
   }
@@ -106,68 +126,61 @@ export function removePidFile(): void {
   }
 }
 
-// --- Status line ---
+// --- Shared broker start logic ---
 
-const CLAUDE_SETTINGS_PATH = path.join(
-  process.env.HOME!,
-  ".claude",
-  "settings.json"
-);
-
-const SYNAPSE_STATUS_LINE_SCRIPT = path.join(DATA_DIR, "statusline.sh");
-
-function synapseBadge(): string {
-  // Shared snippet: query broker for pending count + format the badge
-  return `
-  agent="$SYNAPSE_AGENT_NAME"
-  badge="$agent"
-  # Check for pending messages (fast localhost call, timeout 1s)
-  pending=$(curl -s --max-time 1 "http://127.0.0.1:${DEFAULT_PORT}/pending/$agent" 2>/dev/null | jq -r '.pending // 0')
-  if [ "$pending" != "0" ] && [ -n "$pending" ]; then
-    badge="$agent ($pending)"
-  fi`;
-}
-
-function buildStatusLineScript(existingCommand: string | null): string {
-  // If there's an existing status line command, run it first and append synapse info
-  if (existingCommand) {
-    // Save the original command to a separate script so it runs cleanly
-    const originalScriptPath = path.join(DATA_DIR, "statusline-original.sh");
-    fs.writeFileSync(
-      originalScriptPath,
-      `#!/bin/bash\n${existingCommand}\n`,
-      { mode: 0o755 }
-    );
-
-    return `#!/bin/bash
-input=$(cat)
-# Run the original status line command
-existing=$(echo "$input" | ${originalScriptPath})
-# Append synapse agent name if set
-if [ -n "$SYNAPSE_AGENT_NAME" ]; then
-${synapseBadge()}
-  printf '%s [synapse: %s]' "$existing" "$badge"
-else
-  printf '%s' "$existing"
-fi
-`;
+export async function spawnBroker(): Promise<{
+  started: boolean;
+  pid?: number;
+  message: string;
+}> {
+  const config = getConfig();
+  if (!config) {
+    return { started: false, message: "No config found. Run setup first." };
   }
 
-  // No existing status line — show folder name + synapse info
-  return `#!/bin/bash
-input=$(cat)
-dir=$(echo "$input" | jq -r '.cwd')
-name=$(basename "$dir")
-if [ -n "$SYNAPSE_AGENT_NAME" ]; then
-${synapseBadge()}
-  printf ' %s [synapse: %s]' "$name" "$badge"
-else
-  printf ' %s' "$name"
-fi
-`;
+  const existingPid = getBrokerPid();
+  if (existingPid) {
+    return {
+      started: false,
+      pid: existingPid,
+      message: `Broker already running (PID ${existingPid})`,
+    };
+  }
+
+  const brokerScript = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "broker.js"
+  );
+  const child = spawn("node", [brokerScript], {
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env },
+  });
+  child.unref();
+
+  // Wait up to 3 seconds for broker to be ready
+  for (let i = 0; i < 30; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+    try {
+      const res = await fetch(`http://${config.host}:${config.port}/health`, {
+        signal: AbortSignal.timeout(1000),
+      });
+      if (res.ok) {
+        return {
+          started: true,
+          pid: child.pid,
+          message: `Broker started on ${config.host}:${config.port} (PID ${child.pid})`,
+        };
+      }
+    } catch {
+      // Not ready yet
+    }
+  }
+
+  return { started: false, message: "Failed to start broker" };
 }
 
-const CLAUDE_JSON_PATH = path.join(process.env.HOME!, ".claude.json");
+// --- Install: MCP server ---
 
 export function installMcpServer(): { installed: boolean; message: string } {
   let config: Record<string, unknown> = {};
@@ -181,8 +194,10 @@ export function installMcpServer(): { installed: boolean; message: string } {
     return { installed: false, message: "MCP server already registered" };
   }
 
-  // Use absolute path to the compiled channel.js
-  const channelPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "channel.js");
+  const channelPath = path.join(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "channel.js"
+  );
 
   mcpServers.synapse = {
     type: "stdio",
@@ -194,13 +209,62 @@ export function installMcpServer(): { installed: boolean; message: string } {
   };
   config.mcpServers = mcpServers;
 
-  fs.writeFileSync(CLAUDE_JSON_PATH, JSON.stringify(config, null, 2));
+  fs.writeFileSync(CLAUDE_JSON_PATH, JSON.stringify(config, null, 2), {
+    mode: 0o600,
+  });
 
   return { installed: true, message: "MCP server registered globally" };
 }
 
+// --- Install: Status line ---
+
+function buildStatusLineScript(existingCommand: string | null): string {
+  // Node-based pending check (no jq dependency)
+  const pendingCheck = `
+  agent="$SYNAPSE_AGENT_NAME"
+  badge="$agent"
+  pending=$(curl -s --max-time 1 "http://127.0.0.1:${DEFAULT_PORT}/pending/$agent" 2>/dev/null)
+  if [ -n "$pending" ]; then
+    count=$(node -e "try{console.log(JSON.parse(process.argv[1]).pending||0)}catch{console.log(0)}" "$pending" 2>/dev/null)
+    if [ "$count" != "0" ] && [ -n "$count" ]; then
+      badge="$agent ($count)"
+    fi
+  fi`;
+
+  if (existingCommand) {
+    const originalScriptPath = path.join(DATA_DIR, "statusline-original.sh");
+    fs.writeFileSync(
+      originalScriptPath,
+      `#!/bin/bash\n${existingCommand}\n`,
+      { mode: 0o755 }
+    );
+
+    return `#!/bin/bash
+input=$(cat)
+existing=$(echo "$input" | ${originalScriptPath})
+if [ -n "$SYNAPSE_AGENT_NAME" ]; then
+${pendingCheck}
+  printf '%s [synapse: %s]' "$existing" "$badge"
+else
+  printf '%s' "$existing"
+fi
+`;
+  }
+
+  return `#!/bin/bash
+input=$(cat)
+dir=$(node -e "try{console.log(JSON.parse(process.argv[1]).cwd)}catch{console.log('.')}" "$(cat)" 2>/dev/null <<< "$input")
+name=$(basename "$dir")
+if [ -n "$SYNAPSE_AGENT_NAME" ]; then
+${pendingCheck}
+  printf ' %s [synapse: %s]' "$name" "$badge"
+else
+  printf ' %s' "$name"
+fi
+`;
+}
+
 export function installStatusLine(): { installed: boolean; message: string } {
-  // Read existing Claude settings
   let settings: Record<string, unknown> = {};
   if (fs.existsSync(CLAUDE_SETTINGS_PATH)) {
     settings = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS_PATH, "utf-8"));
@@ -210,19 +274,15 @@ export function installStatusLine(): { installed: boolean; message: string } {
     | { type?: string; command?: string }
     | undefined;
 
-  // If already pointing to our script, skip
   if (currentStatusLine?.command?.includes(SYNAPSE_STATUS_LINE_SCRIPT)) {
     return { installed: false, message: "Status line already configured" };
   }
 
-  // Build script that wraps the existing command (if any)
   const existingCommand = currentStatusLine?.command ?? null;
   const script = buildStatusLineScript(existingCommand);
 
-  // Write the status line script
   fs.writeFileSync(SYNAPSE_STATUS_LINE_SCRIPT, script, { mode: 0o755 });
 
-  // Back up the existing status line config
   if (currentStatusLine) {
     const backupPath = path.join(DATA_DIR, "statusline-backup.json");
     fs.writeFileSync(
@@ -232,34 +292,36 @@ export function installStatusLine(): { installed: boolean; message: string } {
     );
   }
 
-  // Update settings to use our wrapper script
   settings.statusLine = {
     type: "command",
     command: SYNAPSE_STATUS_LINE_SCRIPT,
   };
 
-  fs.writeFileSync(CLAUDE_SETTINGS_PATH, JSON.stringify(settings, null, 2));
+  fs.writeFileSync(CLAUDE_SETTINGS_PATH, JSON.stringify(settings, null, 2), {
+    mode: 0o600,
+  });
 
   return {
     installed: true,
     message: existingCommand
-      ? "Status line updated (wraps your existing status line, backup at ~/.claude-synapse/statusline-backup.json)"
+      ? "Status line updated (wraps your existing, backup at ~/.claude-synapse/statusline-backup.json)"
       : "Status line configured",
   };
 }
 
-// --- PostToolUse hook ---
-
-const SYNAPSE_HOOK_SCRIPT = path.join(DATA_DIR, "check-hook.sh");
+// --- Install: PostToolUse hook ---
 
 export function installHook(): { installed: boolean; message: string } {
-  // Write the hook script — checks pending count silently
+  // Node-based hook script (no jq dependency)
   const hookScript = `#!/bin/bash
 # Only run if SYNAPSE_AGENT_NAME is set
 [ -z "$SYNAPSE_AGENT_NAME" ] && exit 0
 
 # Quick check for pending messages (1s timeout)
-pending=$(curl -s --max-time 1 "http://127.0.0.1:${DEFAULT_PORT}/pending/$SYNAPSE_AGENT_NAME" 2>/dev/null | jq -r '.pending // 0')
+resp=$(curl -s --max-time 1 "http://127.0.0.1:${DEFAULT_PORT}/pending/$SYNAPSE_AGENT_NAME" 2>/dev/null)
+[ -z "$resp" ] && exit 0
+
+pending=$(node -e "try{console.log(JSON.parse(process.argv[1]).pending||0)}catch{console.log(0)}" "$resp" 2>/dev/null)
 
 if [ "$pending" != "0" ] && [ -n "$pending" ]; then
   echo "[Synapse: $pending pending message(s) for $SYNAPSE_AGENT_NAME — use check_messages to read them]"
@@ -269,24 +331,24 @@ exit 0
 
   fs.writeFileSync(SYNAPSE_HOOK_SCRIPT, hookScript, { mode: 0o755 });
 
-  // Add hook to settings.json
   let settings: Record<string, unknown> = {};
   if (fs.existsSync(CLAUDE_SETTINGS_PATH)) {
     settings = JSON.parse(fs.readFileSync(CLAUDE_SETTINGS_PATH, "utf-8"));
   }
 
   const hooks = (settings.hooks ?? {}) as Record<string, unknown[]>;
-  const postToolUse = (hooks.PostToolUse ?? []) as Array<Record<string, unknown>>;
+  const postToolUse = (hooks.PostToolUse ?? []) as Array<
+    Record<string, unknown>
+  >;
 
-  // Check if our hook is already installed
-  const alreadyInstalled = postToolUse.some(
-    (h) => {
-      const hookEntries = h.hooks as Array<Record<string, unknown>> | undefined;
-      return hookEntries?.some(
-        (entry) => typeof entry.command === "string" && entry.command.includes("check-hook.sh")
-      );
-    }
-  );
+  const alreadyInstalled = postToolUse.some((h) => {
+    const hookEntries = h.hooks as Array<Record<string, unknown>> | undefined;
+    return hookEntries?.some(
+      (entry) =>
+        typeof entry.command === "string" &&
+        entry.command.includes("check-hook.sh")
+    );
+  });
 
   if (alreadyInstalled) {
     return { installed: false, message: "Hook already configured" };
@@ -305,7 +367,79 @@ exit 0
   hooks.PostToolUse = postToolUse;
   settings.hooks = hooks;
 
-  fs.writeFileSync(CLAUDE_SETTINGS_PATH, JSON.stringify(settings, null, 2));
+  fs.writeFileSync(CLAUDE_SETTINGS_PATH, JSON.stringify(settings, null, 2), {
+    mode: 0o600,
+  });
 
   return { installed: true, message: "PostToolUse hook installed" };
+}
+
+// --- Uninstall ---
+
+export function uninstall(): string[] {
+  const actions: string[] = [];
+
+  // Remove from ~/.claude.json
+  if (fs.existsSync(CLAUDE_JSON_PATH)) {
+    const config = JSON.parse(fs.readFileSync(CLAUDE_JSON_PATH, "utf-8"));
+    const mcpServers = config.mcpServers as Record<string, unknown> | undefined;
+    if (mcpServers?.synapse) {
+      delete mcpServers.synapse;
+      fs.writeFileSync(CLAUDE_JSON_PATH, JSON.stringify(config, null, 2), {
+        mode: 0o600,
+      });
+      actions.push("Removed MCP server from ~/.claude.json");
+    }
+  }
+
+  // Remove hook and status line from settings.json
+  if (fs.existsSync(CLAUDE_SETTINGS_PATH)) {
+    const settings = JSON.parse(
+      fs.readFileSync(CLAUDE_SETTINGS_PATH, "utf-8")
+    );
+
+    // Remove hook
+    const hooks = settings.hooks as Record<string, unknown[]> | undefined;
+    if (hooks?.PostToolUse) {
+      const filtered = (
+        hooks.PostToolUse as Array<Record<string, unknown>>
+      ).filter((h) => {
+        const entries = h.hooks as Array<Record<string, unknown>> | undefined;
+        return !entries?.some(
+          (e) =>
+            typeof e.command === "string" &&
+            e.command.includes("check-hook.sh")
+        );
+      });
+      if (filtered.length < (hooks.PostToolUse as unknown[]).length) {
+        hooks.PostToolUse = filtered;
+        if (filtered.length === 0) delete hooks.PostToolUse;
+        actions.push("Removed PostToolUse hook");
+      }
+    }
+
+    // Restore status line
+    const statusLine = settings.statusLine as
+      | { command?: string }
+      | undefined;
+    if (statusLine?.command?.includes(SYNAPSE_STATUS_LINE_SCRIPT)) {
+      const backupPath = path.join(DATA_DIR, "statusline-backup.json");
+      if (fs.existsSync(backupPath)) {
+        const backup = JSON.parse(fs.readFileSync(backupPath, "utf-8"));
+        settings.statusLine = backup.statusLine;
+        actions.push("Restored original status line");
+      } else {
+        delete settings.statusLine;
+        actions.push("Removed status line");
+      }
+    }
+
+    fs.writeFileSync(
+      CLAUDE_SETTINGS_PATH,
+      JSON.stringify(settings, null, 2),
+      { mode: 0o600 }
+    );
+  }
+
+  return actions;
 }
