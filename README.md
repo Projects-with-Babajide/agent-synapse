@@ -1,8 +1,8 @@
-# Synapse
+# Agent Synapse
 
 Cross-project messaging between Claude Code sessions via named agents.
 
-Synapse lets multiple Claude Code sessions talk to each other — even across different project folders. One agent finishes work and sends context to another.
+Agent Synapse lets multiple Claude Code sessions talk to each other — even across different project folders. One agent finishes work and sends context to another.
 
 ```
 Terminal 1 (~/backend)              Terminal 2 (~/frontend)
@@ -20,10 +20,10 @@ Terminal 1 (~/backend)              Terminal 2 (~/frontend)
 
 ```bash
 # Install
-npm install -g claude-synapse
+npm install -g agent-synapse
 
 # One-time setup (registers MCP server, installs hook, configures status line)
-claude-synapse setup
+agent-synapse setup
 ```
 
 Then open two terminals:
@@ -72,11 +72,12 @@ In both modes, if the target agent is offline, messages are queued to disk and d
 ## CLI
 
 ```bash
-claude-synapse setup           # Configure Synapse (run once)
-claude-synapse broker start    # Start broker manually (usually auto-started)
-claude-synapse broker stop     # Stop the broker
-claude-synapse broker status   # Show broker and connected agents
-claude-synapse version         # Show version
+agent-synapse setup           # Configure Synapse (run once)
+agent-synapse broker start    # Start broker manually (usually auto-started)
+agent-synapse broker stop     # Stop the broker
+agent-synapse broker status   # Show broker and connected agents
+agent-synapse uninstall       # Remove Synapse from Claude Code settings
+agent-synapse version         # Show version
 ```
 
 ## Agent Naming
@@ -104,7 +105,7 @@ Once connected, Claude has these tools:
 
 ## What `setup` does
 
-Running `claude-synapse setup` configures three things:
+Running `agent-synapse setup` configures three things:
 
 1. **MCP server** — Registers Synapse globally in `~/.claude.json` so the tools are available in every Claude Code session
 2. **PostToolUse hook** — Adds a hook to `~/.claude/settings.json` that checks for pending messages after every tool use and nudges Claude to read them
@@ -114,7 +115,7 @@ Running `claude-synapse setup` configures three things:
 
 **Broker** — Lightweight HTTP server on `localhost:3117`
 - Routes messages between agents via SSE (channel mode) or queue polling (standard mode)
-- Persists undelivered messages to disk (`~/.claude-synapse/queues.jsonl`)
+- Persists undelivered messages to disk (`~/.agent-synapse/queues.jsonl`)
 - Zero external dependencies (Node.js stdlib only)
 
 **MCP Server** — Registered globally, spawned per Claude Code session
