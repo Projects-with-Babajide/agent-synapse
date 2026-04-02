@@ -147,7 +147,9 @@ async function brokerStatus(): Promise<void> {
   const pid = getBrokerPid();
 
   try {
-    const res = await fetch(`http://${config.host}:${config.port}/agents?token=${config.token}`);
+    const res = await fetch(`http://${config.host}:${config.port}/agents`, {
+      headers: { Authorization: `Bearer ${config.token}` },
+    });
     if (res.ok) {
       const data = (await res.json()) as {
         agents: Array<{ name: string; status: string; registered_at: string }>;

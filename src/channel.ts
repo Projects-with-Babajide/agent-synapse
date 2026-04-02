@@ -61,21 +61,29 @@ async function brokerGet(
   config: BrokerConfig,
   pathname: string
 ): Promise<{ status: number; data: unknown }> {
-  const url = `${brokerUrl(config, pathname)}${pathname.includes("?") ? "&" : "?"}token=${config.token}`;
+  const url = new URL(brokerUrl(config, pathname));
 
   return new Promise((resolve, reject) => {
     http
-      .get(url, (res) => {
-        let data = "";
-        res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => {
-          try {
-            resolve({ status: res.statusCode ?? 500, data: JSON.parse(data) });
-          } catch {
-            resolve({ status: res.statusCode ?? 500, data });
-          }
-        });
-      })
+      .get(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: url.pathname,
+          headers: { Authorization: `Bearer ${config.token}` },
+        },
+        (res) => {
+          let data = "";
+          res.on("data", (chunk) => (data += chunk));
+          res.on("end", () => {
+            try {
+              resolve({ status: res.statusCode ?? 500, data: JSON.parse(data) });
+            } catch {
+              resolve({ status: res.statusCode ?? 500, data });
+            }
+          });
+        }
+      )
       .on("error", reject);
   });
 }
@@ -121,9 +129,16 @@ function connectSSE(
   function connect() {
     // Re-read config each time we connect — token may have changed
     const config = getConfig();
-    const url = `${brokerUrl(config, `/stream/${agentName}`)}?token=${config.token}`;
+    const sseUrl = new URL(brokerUrl(config, `/stream/${agentName}`));
 
-    const req = http.get(url, (res) => {
+    const req = http.get(
+      {
+        hostname: sseUrl.hostname,
+        port: sseUrl.port,
+        path: sseUrl.pathname,
+        headers: { Authorization: `Bearer ${config.token}` },
+      },
+      (res) => {
       // Auth failure — config may have changed, re-register and retry
       if (res.statusCode === 401) {
         res.resume();

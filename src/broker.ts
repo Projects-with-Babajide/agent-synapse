@@ -8,6 +8,7 @@ import {
   KEEPALIVE_INTERVAL_MS,
 } from "./types.js";
 import type { SynapseMessage, Agent } from "./types.js";
+import { isValidAgentName } from "./config.js";
 import {
   getConfig,
   getQueuesPath,
@@ -117,8 +118,7 @@ export function startBroker(): void {
     const { pathname, searchParams } = parseUrl(req);
     const method = req.method ?? "GET";
 
-    // CORS for local development
-    res.setHeader("Access-Control-Allow-Origin", "*");
+    // No CORS — this API should only be called by local processes, not browsers
 
     // --- GET /health (no auth) ---
     if (method === "GET" && pathname === "/health") {
@@ -129,7 +129,13 @@ export function startBroker(): void {
     // --- Auth for all other endpoints ---
     let token: string | null = null;
     if (method === "GET") {
-      token = searchParams.get("token");
+      // Accept token from Authorization header or query param (fallback)
+      const authHeader = req.headers.authorization;
+      if (authHeader?.startsWith("Bearer ")) {
+        token = authHeader.slice(7);
+      } else {
+        token = searchParams.get("token");
+      }
     } else {
       // Token comes in the request body for POST requests
     }
@@ -254,6 +260,10 @@ export function startBroker(): void {
         const name = payload.name as string;
         if (!name) {
           json(res, 400, { error: "Missing agent name" });
+          return;
+        }
+        if (!isValidAgentName(name)) {
+          json(res, 400, { error: "Invalid agent name. Use only letters, numbers, hyphens, and underscores (max 64 chars)." });
           return;
         }
 

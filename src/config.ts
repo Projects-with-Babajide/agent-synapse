@@ -49,18 +49,34 @@ export function saveConfig(config: BrokerConfig): void {
   });
 }
 
+const VALID_AGENT_NAME = /^[a-zA-Z0-9_-]+$/;
+
+export function sanitizeAgentName(name: string): string {
+  // Strip any characters that aren't alphanumeric, hyphens, or underscores
+  const sanitized = name.replace(/[^a-zA-Z0-9_-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  return sanitized || "agent";
+}
+
+export function isValidAgentName(name: string): boolean {
+  return VALID_AGENT_NAME.test(name) && name.length > 0 && name.length <= 64;
+}
+
 export function resolveAgentName(): string {
   // Priority: env var → CLI --name arg → folder name
+  let name: string;
+
   if (process.env.SYNAPSE_AGENT_NAME) {
-    return process.env.SYNAPSE_AGENT_NAME;
+    name = process.env.SYNAPSE_AGENT_NAME;
+  } else {
+    const nameArgIndex = process.argv.indexOf("--name");
+    if (nameArgIndex !== -1 && process.argv[nameArgIndex + 1]) {
+      name = process.argv[nameArgIndex + 1];
+    } else {
+      name = path.basename(process.cwd());
+    }
   }
 
-  const nameArgIndex = process.argv.indexOf("--name");
-  if (nameArgIndex !== -1 && process.argv[nameArgIndex + 1]) {
-    return process.argv[nameArgIndex + 1];
-  }
-
-  return path.basename(process.cwd());
+  return sanitizeAgentName(name);
 }
 
 export function getBrokerPid(): number | null {
