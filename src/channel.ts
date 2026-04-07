@@ -5,9 +5,40 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import http from "node:http";
-import { getConfig, resolveAgentName, spawnBroker } from "./config.js";
-import type { BrokerConfig, SynapseMessage } from "./types.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { getConfig, resolveAgentName, spawnBroker, createAgent } from "./config.js";
+import type { BrokerConfig, SSEHint } from "./types.js";
 import { VERSION, HTTP_TIMEOUT_MS } from "./types.js";
+
+// --- Session name file (keyed by Claude Code's PID so multiple sessions don't collide) ---
+
+const SESSION_FILE = path.join(
+  os.homedir(),
+  ".claude-synapse",
+  `session-${process.ppid}.name`
+);
+
+function writeSessionName(name: string): void {
+  try {
+    fs.writeFileSync(SESSION_FILE, name, { mode: 0o600 });
+  } catch {
+    // Non-fatal
+  }
+}
+
+function cleanupSessionFile(): void {
+  try {
+    if (fs.existsSync(SESSION_FILE)) fs.unlinkSync(SESSION_FILE);
+  } catch {
+    // Non-fatal
+  }
+}
+
+process.on("exit", cleanupSessionFile);
+process.on("SIGINT", () => { cleanupSessionFile(); process.exit(0); });
+process.on("SIGTERM", () => { cleanupSessionFile(); process.exit(0); });
 
 // --- Broker communication ---
 
@@ -121,7 +152,7 @@ async function ensureBroker(config: BrokerConfig): Promise<void> {
 function connectSSE(
   getConfig: () => BrokerConfig,
   agentName: string,
-  onMessage: (msg: SynapseMessage) => void
+  onMessage: (hint: SSEHint) => void
 ): { destroy: () => void } {
   let destroyed = false;
   let currentReq: http.ClientRequest | null = null;
@@ -172,8 +203,8 @@ function connectSSE(
           for (const line of lines) {
             if (line.startsWith("data: ")) {
               try {
-                const message = JSON.parse(line.slice(6)) as SynapseMessage;
-                onMessage(message);
+                const hint = JSON.parse(line.slice(6)) as SSEHint;
+                onMessage(hint);
               } catch {
                 // Skip malformed messages
               }
@@ -251,6 +282,7 @@ async function main(): Promise<void> {
 
   await ensureBroker(initialConfig);
   await brokerPost(initialConfig, "/register", { name: agentName });
+  writeSessionName(agentName);
 
   const mcp = new Server(
     { name: "synapse", version: VERSION },
@@ -272,17 +304,19 @@ async function main(): Promise<void> {
 
   function startSSE(name: string) {
     if (sseHandle) sseHandle.destroy();
-    sseHandle = connectSSE(freshConfig, name, async (msg) => {
+    sseHandle = connectSSE(freshConfig, name, async (hint) => {
+      // Try to push a channel notification — Claude Code may surface this to the model
       try {
         await mcp.notification({
           method: "notifications/claude/channel",
           params: {
-            content: msg.content,
-            meta: { from: msg.from, timestamp: msg.timestamp },
+            content: `[Synapse: new message from ${hint.from} — use check_messages to read it]`,
+            meta: { from: hint.from, timestamp: hint.timestamp },
           },
         });
       } catch {
-        // Channel notification failed — acceptable for v1
+        // If channel notifications aren't supported, the UserPromptSubmit/PostToolUse hooks
+        // will still catch pending messages
       }
     });
   }
@@ -327,6 +361,30 @@ async function main(): Promise<void> {
       description: "List all registered Synapse agents and their status",
       inputSchema: { type: "object" as const, properties: {} },
     },
+    {
+      name: "create_agent",
+      description:
+        "Scaffold a new named agent in the current project. Creates an agents/<name>/CLAUDE.md with the agent's identity and a Synapse self-registration instruction so the agent registers automatically when its session starts.",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          name: {
+            type: "string",
+            description: "Agent name (e.g. 'backend', 'data-pipeline')",
+          },
+          description: {
+            type: "string",
+            description: "What this agent does — written into its CLAUDE.md",
+          },
+          dir: {
+            type: "string",
+            description:
+              "Base directory to create the agent in (default: current working directory)",
+          },
+        },
+        required: ["name", "description"],
+      },
+    },
   ];
 
   // Tool handlers
@@ -338,6 +396,7 @@ async function main(): Promise<void> {
       const newName = args.name;
       await brokerPost(freshConfig(), "/register", { name: newName });
       agentName = newName;
+      writeSessionName(newName);
       startSSE(newName);
       return textResult(`Registered as "${newName}". Now listening for messages.`);
     },
@@ -351,10 +410,10 @@ async function main(): Promise<void> {
       });
 
       if (status === 200) {
-        const result = data as { delivered: boolean };
+        const result = data as { queued: boolean; notified: boolean };
         return textResult(
-          result.delivered
-            ? `Message delivered to "${args.to}"`
+          result.notified
+            ? `Message sent to "${args.to}" — they'll be prompted to check messages`
             : `Message queued for "${args.to}" (they'll receive it when they connect)`
         );
       }
@@ -396,6 +455,19 @@ async function main(): Promise<void> {
         (a) => `${a.name} (${a.status}, registered ${a.registered_at})`
       );
       return textResult(lines.join("\n"));
+    },
+
+    async create_agent(args) {
+      const baseDir = args.dir || process.cwd();
+      const result = createAgent(args.name, args.description, baseDir);
+
+      if (!result.created) {
+        return textResult(result.message);
+      }
+
+      return textResult(
+        `${result.message}\n\nTo start this agent, open a new terminal and run:\n  cd ${result.agentDir} && claude\n\nThe agent will register itself as "${args.name}" automatically when the session starts.`
+      );
     },
   };
 

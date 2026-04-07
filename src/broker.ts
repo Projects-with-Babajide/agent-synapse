@@ -9,7 +9,7 @@ import {
   MAX_QUEUE_DEPTH,
   KEEPALIVE_INTERVAL_MS,
 } from "./types.js";
-import type { SynapseMessage, Agent } from "./types.js";
+import type { SynapseMessage, SSEHint, Agent } from "./types.js";
 import { isValidAgentName } from "./config.js";
 import {
   getConfig,
@@ -91,12 +91,14 @@ function validateToken(token: string | null, expectedToken: string): boolean {
   return token === expectedToken;
 }
 
-// --- SSE delivery ---
+// --- SSE notification ---
 
-function deliverMessage(to: string, message: SynapseMessage): boolean {
+function notifyViaSSE(to: string, message: SynapseMessage): boolean {
   const clients = sseClients.get(to);
   if (clients && clients.length > 0) {
-    const data = `data: ${JSON.stringify(message)}\n\n`;
+    // Send a lightweight hint — the agent should call check_messages to retrieve
+    const hint: SSEHint = { type: "message_available", from: message.from, timestamp: message.timestamp };
+    const data = `data: ${JSON.stringify(hint)}\n\n`;
     for (const client of clients) {
       client.write(data);
     }
@@ -302,26 +304,25 @@ export function startBroker(): void {
           timestamp: new Date().toISOString(),
         };
 
-        // Try to deliver via SSE first
-        const delivered = deliverMessage(to, message);
+        // Always queue the message — check_messages is the reliable delivery path
+        if (!queues.has(to)) queues.set(to, []);
+        const queue = queues.get(to)!;
 
-        if (!delivered) {
-          // Queue the message
-          if (!queues.has(to)) queues.set(to, []);
-          const queue = queues.get(to)!;
-
-          if (queue.length >= MAX_QUEUE_DEPTH) {
-            json(res, 429, { error: "Queue full for target agent" });
-            return;
-          }
-
-          queue.push(message);
-          persistQueues();
+        if (queue.length >= MAX_QUEUE_DEPTH) {
+          json(res, 429, { error: "Queue full for target agent" });
+          return;
         }
+
+        queue.push(message);
+        persistQueues();
+
+        // Notify via SSE as a hint (agent still needs to call check_messages)
+        const notified = notifyViaSSE(to, message);
 
         json(res, 200, {
           sent: true,
-          delivered,
+          queued: true,
+          notified,
           to,
         });
         return;

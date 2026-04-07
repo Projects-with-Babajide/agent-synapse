@@ -5,6 +5,12 @@ export interface SynapseMessage {
   timestamp: string;
 }
 
+export interface SSEHint {
+  type: "message_available";
+  from: string;
+  timestamp: string;
+}
+
 export interface Agent {
   name: string;
   status: "connected" | "disconnected";

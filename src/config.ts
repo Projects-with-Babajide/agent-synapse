@@ -219,15 +219,25 @@ export function installMcpServer(): { installed: boolean; message: string } {
 // --- Install: Status line ---
 
 function buildStatusLineScript(existingCommand: string | null): string {
+  // Resolve agent name: env var first, then session file (written by channel.ts on register_agent),
+  // keyed by $PPID so multiple Claude sessions don't collide.
+  const resolveAgent = `
+  _synapse_agent="$SYNAPSE_AGENT_NAME"
+  if [ -z "$_synapse_agent" ]; then
+    _session_file="$HOME/.claude-synapse/session-$PPID.name"
+    if [ -f "$_session_file" ]; then
+      _synapse_agent=$(cat "$_session_file" 2>/dev/null)
+    fi
+  fi`;
+
   // Node-based pending check (no jq dependency)
   const pendingCheck = `
-  agent="$SYNAPSE_AGENT_NAME"
-  badge="$agent"
-  pending=$(curl -s --max-time 1 "http://127.0.0.1:${DEFAULT_PORT}/pending/$agent" 2>/dev/null)
+  badge="$_synapse_agent"
+  pending=$(curl -s --max-time 1 "http://127.0.0.1:${DEFAULT_PORT}/pending/$_synapse_agent" 2>/dev/null)
   if [ -n "$pending" ]; then
     count=$(node -e "try{console.log(JSON.parse(process.argv[1]).pending||0)}catch{console.log(0)}" "$pending" 2>/dev/null)
     if [ "$count" != "0" ] && [ -n "$count" ]; then
-      badge="$agent ($count)"
+      badge="$_synapse_agent ($count)"
     fi
   fi`;
 
@@ -242,7 +252,8 @@ function buildStatusLineScript(existingCommand: string | null): string {
     return `#!/bin/bash
 input=$(cat)
 existing=$(echo "$input" | ${originalScriptPath})
-if [ -n "$SYNAPSE_AGENT_NAME" ]; then
+${resolveAgent}
+if [ -n "$_synapse_agent" ]; then
 ${pendingCheck}
   printf '%s [synapse: %s]' "$existing" "$badge"
 else
@@ -255,7 +266,8 @@ fi
 input=$(cat)
 dir=$(node -e "try{console.log(JSON.parse(process.argv[1]).cwd)}catch{console.log('.')}" "$(cat)" 2>/dev/null <<< "$input")
 name=$(basename "$dir")
-if [ -n "$SYNAPSE_AGENT_NAME" ]; then
+${resolveAgent}
+if [ -n "$_synapse_agent" ]; then
 ${pendingCheck}
   printf ' %s [synapse: %s]' "$name" "$badge"
 else
@@ -314,17 +326,31 @@ export function installStatusLine(): { installed: boolean; message: string } {
 export function installHook(): { installed: boolean; message: string } {
   // Node-based hook script (no jq dependency)
   const hookScript = `#!/bin/bash
-# Only run if SYNAPSE_AGENT_NAME is set
-[ -z "$SYNAPSE_AGENT_NAME" ] && exit 0
+# Resolve agent name: env var first, then session file (written by channel.ts on register_agent),
+# then fall back to folder name (matches channel.ts logic)
+if [ -n "\$SYNAPSE_AGENT_NAME" ]; then
+  agent="\$SYNAPSE_AGENT_NAME"
+else
+  _session_file="\$HOME/.claude-synapse/session-\$PPID.name"
+  if [ -f "\$_session_file" ]; then
+    agent=\$(cat "\$_session_file" 2>/dev/null)
+  fi
+  if [ -z "\$agent" ]; then
+    agent=\$(basename "\$PWD")
+  fi
+fi
+# Sanitize: only allow alphanumeric, hyphens, underscores
+agent=\$(echo "$agent" | sed 's/[^a-zA-Z0-9_-]/-/g; s/-\\+/-/g; s/^-//; s/-$//')
+[ -z "$agent" ] && exit 0
 
 # Quick check for pending messages (1s timeout)
-resp=$(curl -s --max-time 1 "http://127.0.0.1:${DEFAULT_PORT}/pending/$SYNAPSE_AGENT_NAME" 2>/dev/null)
+resp=\$(curl -s --max-time 1 "http://127.0.0.1:${DEFAULT_PORT}/pending/$agent" 2>/dev/null)
 [ -z "$resp" ] && exit 0
 
-pending=$(node -e "try{console.log(JSON.parse(process.argv[1]).pending||0)}catch{console.log(0)}" "$resp" 2>/dev/null)
+pending=\$(node -e "try{console.log(JSON.parse(process.argv[1]).pending||0)}catch{console.log(0)}" "$resp" 2>/dev/null)
 
 if [ "$pending" != "0" ] && [ -n "$pending" ]; then
-  echo "[Synapse: $pending pending message(s) for $SYNAPSE_AGENT_NAME — use check_messages to read them]"
+  echo "[Synapse: $pending pending message(s) for $agent — use check_messages to read them]"
 fi
 exit 0
 `;
@@ -337,11 +363,16 @@ exit 0
   }
 
   const hooks = (settings.hooks ?? {}) as Record<string, unknown[]>;
-  const postToolUse = (hooks.PostToolUse ?? []) as Array<
-    Record<string, unknown>
-  >;
+  const hookEntry = {
+    type: "command",
+    command: SYNAPSE_HOOK_SCRIPT,
+  };
 
-  const alreadyInstalled = postToolUse.some((h) => {
+  let installed = false;
+
+  // Install on PostToolUse (fires after every tool call)
+  const postToolUse = (hooks.PostToolUse ?? []) as Array<Record<string, unknown>>;
+  const postToolUseInstalled = postToolUse.some((h) => {
     const hookEntries = h.hooks as Array<Record<string, unknown>> | undefined;
     return hookEntries?.some(
       (entry) =>
@@ -349,29 +380,84 @@ exit 0
         entry.command.includes("check-hook.sh")
     );
   });
-
-  if (alreadyInstalled) {
-    return { installed: false, message: "Hook already configured" };
+  if (!postToolUseInstalled) {
+    postToolUse.push({ matcher: ".*", hooks: [hookEntry] });
+    hooks.PostToolUse = postToolUse;
+    installed = true;
   }
 
-  postToolUse.push({
-    matcher: ".*",
-    hooks: [
-      {
-        type: "command",
-        command: SYNAPSE_HOOK_SCRIPT,
-      },
-    ],
+  // Install on UserPromptSubmit (fires when user sends a message — catches idle agents)
+  const userPromptSubmit = (hooks.UserPromptSubmit ?? []) as Array<Record<string, unknown>>;
+  const userPromptInstalled = userPromptSubmit.some((h) => {
+    const hookEntries = h.hooks as Array<Record<string, unknown>> | undefined;
+    return hookEntries?.some(
+      (entry) =>
+        typeof entry.command === "string" &&
+        entry.command.includes("check-hook.sh")
+    );
   });
+  if (!userPromptInstalled) {
+    userPromptSubmit.push({ hooks: [hookEntry] });
+    hooks.UserPromptSubmit = userPromptSubmit;
+    installed = true;
+  }
 
-  hooks.PostToolUse = postToolUse;
+  if (!installed) {
+    return { installed: false, message: "Hooks already configured" };
+  }
+
   settings.hooks = hooks;
-
   fs.writeFileSync(CLAUDE_SETTINGS_PATH, JSON.stringify(settings, null, 2), {
     mode: 0o600,
   });
 
-  return { installed: true, message: "PostToolUse hook installed" };
+  return { installed: true, message: "Hooks installed (PostToolUse + UserPromptSubmit)" };
+}
+
+// --- Create agent scaffold ---
+
+export function createAgent(
+  name: string,
+  description: string,
+  baseDir: string
+): { created: boolean; agentDir: string; message: string } {
+  if (!isValidAgentName(name)) {
+    return {
+      created: false,
+      agentDir: "",
+      message: `Invalid agent name "${name}". Use only letters, numbers, hyphens, and underscores.`,
+    };
+  }
+
+  const agentDir = path.join(baseDir, "agents", name);
+
+  if (fs.existsSync(agentDir)) {
+    return {
+      created: false,
+      agentDir,
+      message: `Agent directory already exists: ${agentDir}`,
+    };
+  }
+
+  fs.mkdirSync(agentDir, { recursive: true });
+
+  const claudeMd = `# Agent: ${name}
+
+${description}
+
+## Synapse
+You are a Synapse agent named \`${name}\`. At the start of every session, before doing anything else, call the \`register_agent\` tool with name \`${name}\`.
+`;
+
+  fs.writeFileSync(path.join(agentDir, "CLAUDE.md"), claudeMd, {
+    mode: 0o644,
+  });
+
+  return {
+    created: true,
+    agentDir,
+    message: `Agent "${name}" created at ${agentDir}`,
+  };
 }
 
 // --- Uninstall ---
@@ -398,23 +484,28 @@ export function uninstall(): string[] {
       fs.readFileSync(CLAUDE_SETTINGS_PATH, "utf-8")
     );
 
-    // Remove hook
+    // Remove hooks
     const hooks = settings.hooks as Record<string, unknown[]> | undefined;
-    if (hooks?.PostToolUse) {
-      const filtered = (
-        hooks.PostToolUse as Array<Record<string, unknown>>
-      ).filter((h) => {
-        const entries = h.hooks as Array<Record<string, unknown>> | undefined;
-        return !entries?.some(
-          (e) =>
-            typeof e.command === "string" &&
-            e.command.includes("check-hook.sh")
-        );
-      });
-      if (filtered.length < (hooks.PostToolUse as unknown[]).length) {
-        hooks.PostToolUse = filtered;
-        if (filtered.length === 0) delete hooks.PostToolUse;
-        actions.push("Removed PostToolUse hook");
+    if (hooks) {
+      for (const eventType of ["PostToolUse", "UserPromptSubmit"]) {
+        const hookList = hooks[eventType] as Array<Record<string, unknown>> | undefined;
+        if (!hookList) continue;
+        const filtered = hookList.filter((h) => {
+          const entries = h.hooks as Array<Record<string, unknown>> | undefined;
+          return !entries?.some(
+            (e) =>
+              typeof e.command === "string" &&
+              e.command.includes("check-hook.sh")
+          );
+        });
+        if (filtered.length < hookList.length) {
+          if (filtered.length === 0) {
+            delete hooks[eventType];
+          } else {
+            hooks[eventType] = filtered;
+          }
+          actions.push(`Removed ${eventType} hook`);
+        }
       }
     }
 

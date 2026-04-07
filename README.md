@@ -52,6 +52,54 @@ SYNAPSE_AGENT_NAME=backend claude --dangerously-load-development-channels server
 
 This enables Claude Code's Channels API for real-time push. The flag is required during the channels research preview — it will go away once Synapse is published as an approved plugin.
 
+## Scaffolding Agents
+
+For reusable, long-lived agents you can scaffold a persistent agent with its own `CLAUDE.md`. This lets you open the agent by simply running `claude` from its folder — no env var needed.
+
+### From inside a Claude session (MCP tool)
+
+If you're already in Claude and want to create a new agent on the fly:
+
+> *"Create an agent called data-pipeline that handles ETL jobs and knows about our Postgres schema"*
+
+This calls the `create_agent` tool, which creates `agents/data-pipeline/CLAUDE.md` in your current project and prints the command to open it.
+
+### From the terminal (CLI)
+
+```bash
+# In your project directory
+agent-synapse create-agent data-pipeline "Handles ETL jobs and knows about our Postgres schema"
+```
+
+Both approaches create:
+
+```
+your-project/
+└── agents/
+    └── data-pipeline/
+        └── CLAUDE.md      ← identity + Synapse self-registration instruction
+```
+
+The scaffolded `CLAUDE.md` tells the agent to register itself automatically when the session starts:
+
+```markdown
+# Agent: data-pipeline
+
+Handles ETL jobs and knows about our Postgres schema.
+
+## Synapse
+You are a Synapse agent named `data-pipeline`. At the start of every session,
+before doing anything else, call the `register_agent` tool with name `data-pipeline`.
+```
+
+To start the agent:
+
+```bash
+cd agents/data-pipeline && claude
+```
+
+The agent registers itself, the status line updates, and it's ready to receive messages.
+
 ## How It Works
 
 Synapse supports two delivery modes:
@@ -72,25 +120,27 @@ In both modes, if the target agent is offline, messages are queued to disk and d
 ## CLI
 
 ```bash
-agent-synapse setup           # Configure Synapse (run once)
-agent-synapse broker start    # Start broker manually (usually auto-started)
-agent-synapse broker stop     # Stop the broker
-agent-synapse broker status   # Show broker and connected agents
-agent-synapse uninstall       # Remove Synapse from Claude Code settings
-agent-synapse version         # Show version
+agent-synapse setup                            # Configure Synapse (run once)
+agent-synapse create-agent <name> [desc]       # Scaffold a new agent in ./agents/<name>/
+agent-synapse broker start                     # Start broker manually (usually auto-started)
+agent-synapse broker stop                      # Stop the broker
+agent-synapse broker status                    # Show broker and connected agents
+agent-synapse uninstall                        # Remove Synapse from Claude Code settings
+agent-synapse version                          # Show version
 ```
 
 ## Agent Naming
 
-Set the agent name via environment variable:
+Three ways to set the agent name, in order of precedence:
 
+**1. Environment variable** — most explicit, set before launching Claude:
 ```bash
 SYNAPSE_AGENT_NAME=backend claude
 ```
 
-Or register from within a session by telling Claude: *"Register as backend"*
+**2. Self-registration via CLAUDE.md** — for scaffolded agents, the agent's `CLAUDE.md` instructs it to call `register_agent` automatically at session start. The status line updates once registration completes.
 
-If neither is set, defaults to the current folder name (e.g. `~/projects/backend` becomes `backend`).
+**3. Folder name fallback** — if neither of the above is set, defaults to the current folder name (e.g. `~/projects/backend` becomes `backend`). The PostToolUse and UserPromptSubmit hooks use this to check for pending messages even before explicit registration.
 
 ## Tools
 
@@ -102,26 +152,27 @@ Once connected, Claude has these tools:
 | `check_messages` | Retrieve pending messages from the queue |
 | `list_agents` | List all registered agents and their status |
 | `register_agent` | Set or change the agent name for this session |
+| `create_agent` | Scaffold a new agent with a `CLAUDE.md` in the current project |
 
 ## What `setup` does
 
 Running `agent-synapse setup` configures three things:
 
 1. **MCP server** — Registers Synapse globally in `~/.claude.json` so the tools are available in every Claude Code session
-2. **PostToolUse hook** — Adds a hook to `~/.claude/settings.json` that checks for pending messages after every tool use and nudges Claude to read them
-3. **Status line** — Wraps your existing status line to show the Synapse agent name and pending message count (e.g. `backend [synapse: backend (3)]`)
+2. **Hooks** — Adds PostToolUse and UserPromptSubmit hooks to `~/.claude/settings.json` that check for pending messages and nudge Claude to read them
+3. **Status line** — Wraps your existing status line to show the agent name and pending message count (e.g. `backend [synapse: backend (3)]`)
 
 ## Architecture
 
 **Broker** — Lightweight HTTP server on `localhost:3117`
 - Routes messages between agents via SSE (channel mode) or queue polling (standard mode)
-- Persists undelivered messages to disk (`~/.agent-synapse/queues.jsonl`)
+- Persists undelivered messages to disk (`~/.claude-synapse/queues.jsonl`)
 - Zero external dependencies (Node.js stdlib only)
 
 **MCP Server** — Registered globally, spawned per Claude Code session
-- Provides send_message, check_messages, list_agents, and register_agent tools
+- Provides `send_message`, `check_messages`, `list_agents`, `register_agent`, and `create_agent` tools
 - Auto-starts the broker if it's not running
-- In channel mode, also pushes messages in real-time via SSE
+- Writes a session file (`~/.claude-synapse/session-<ppid>.name`) when an agent registers so the status line can show the name even without `SYNAPSE_AGENT_NAME` being set
 
 ## Security
 

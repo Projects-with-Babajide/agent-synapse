@@ -13,6 +13,7 @@ import {
   installHook,
   spawnBroker,
   uninstall,
+  createAgent,
 } from "./config.js";
 import { DEFAULT_PORT, DEFAULT_HOST, VERSION } from "./types.js";
 
@@ -21,12 +22,13 @@ function printUsage(): void {
 agent-synapse — Cross-project messaging between Claude Code sessions
 
 Usage:
-  agent-synapse setup              Set up Synapse (generates config and token)
-  agent-synapse broker start       Start the message broker daemon
-  agent-synapse broker stop        Stop the broker daemon
-  agent-synapse broker status      Show broker status and connected agents
-  agent-synapse uninstall          Remove Synapse from Claude Code settings
-  agent-synapse version            Show version
+  agent-synapse setup                           Set up Synapse (generates config and token)
+  agent-synapse create-agent <name> [desc]      Scaffold a new agent in ./agents/<name>/
+  agent-synapse broker start                    Start the message broker daemon
+  agent-synapse broker stop                     Stop the broker daemon
+  agent-synapse broker status                   Show broker status and connected agents
+  agent-synapse uninstall                       Remove Synapse from Claude Code settings
+  agent-synapse version                         Show version
 
 Environment:
   SYNAPSE_AGENT_NAME    Set the agent name for this session (default: folder name)
@@ -155,6 +157,26 @@ function runUninstall(): void {
   }
 }
 
+function cliCreateAgent(name: string | undefined, description: string | undefined): void {
+  if (!name) {
+    console.error("Usage: agent-synapse create-agent <name> [description]");
+    process.exit(1);
+  }
+
+  const desc = description || `${name} agent`;
+  const result = createAgent(name, desc, process.cwd());
+
+  if (!result.created) {
+    console.error(result.message);
+    process.exit(1);
+  }
+
+  console.log(`\n  ${result.message}\n`);
+  console.log("  To start this agent, open a new terminal and run:");
+  console.log(`    cd ${result.agentDir} && claude\n`);
+  console.log(`  The agent will register itself as "${name}" automatically when the session starts.`);
+}
+
 function version(): void {
   console.log(`agent-synapse v${VERSION}`);
 }
@@ -168,6 +190,9 @@ const subcommand = args[1];
 switch (command) {
   case "setup":
     setup();
+    break;
+  case "create-agent":
+    cliCreateAgent(args[1], args.slice(2).join(" ") || undefined);
     break;
   case "broker":
     switch (subcommand) {
