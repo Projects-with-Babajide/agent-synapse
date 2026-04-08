@@ -1,8 +1,11 @@
 # Agent Synapse
 
+[![npm version](https://img.shields.io/npm/v/agent-synapse)](https://www.npmjs.com/package/agent-synapse)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Cross-project messaging between Claude Code sessions via named agents.
 
-Agent Synapse lets multiple Claude Code sessions talk to each other — even across different project folders. One agent finishes work and sends context to another.
+Agent Synapse lets multiple Claude Code sessions talk to each other — even across different project folders. Each session gets a codename. Agents send messages to each other by name, check their inbox, and see who's online.
 
 ```
 Terminal 1 (~/backend)              Terminal 2 (~/frontend)
@@ -15,6 +18,17 @@ Terminal 1 (~/backend)              Terminal 2 (~/frontend)
          └──────── Synapse Broker ───────────┘
               (localhost:3117, auto-started)
 ```
+
+## What can I build with this?
+
+- **Cross-project handoffs** — a frontend agent asks its orchestrator for API details; the orchestrator messages the backend orchestrator, who routes to the right agent and sends back the answer
+- **Specialist teams** — a builder agent implements, a fixer agent patches bugs, an orchestrator coordinates — each with its own focused context
+- **Any multi-step workflow** — set up agents with specific roles and pass context from one to the next, no copying and pasting between terminals
+
+## Requirements
+
+- Node.js >= 18
+- Claude Code (with a claude.ai account — API key auth is not supported)
 
 ## Quickstart
 
@@ -44,19 +58,19 @@ Terminal 2 will pick it up after the next tool use.
 
 ### Real-time push (optional)
 
-For instant message delivery without waiting for a tool use, add the channels flag:
+Standard mode works great on its own — messages are checked after every tool use. If you want instant delivery without any delay, add the channels flag:
 
 ```bash
 SYNAPSE_AGENT_NAME=backend claude --dangerously-load-development-channels server:synapse
 ```
 
-This enables Claude Code's Channels API for real-time push. The flag is required during the channels research preview — it will go away once Synapse is published as an approved plugin.
+This enables Claude Code's Channels API for real-time push. The flag sounds alarming but everything runs locally — it just bypasses Anthropic's allowlist while Synapse is in development. It will go away once Synapse is published as an approved plugin.
 
-## Scaffolding Agents
+## Creating Agents
 
-For reusable, long-lived agents you can scaffold a persistent agent with its own `CLAUDE.md`. This lets you open the agent by simply running `claude` from its folder — no env var needed.
+For reusable, long-lived agents you can create a persistent agent with its own `CLAUDE.md`. This lets you open the agent by simply running `claude` from its folder — no env var needed.
 
-### From inside a Claude session (MCP tool)
+### From inside a Claude session
 
 If you're already in Claude and want to create a new agent on the fly:
 
@@ -64,7 +78,7 @@ If you're already in Claude and want to create a new agent on the fly:
 
 This calls the `create_agent` tool, which creates `agents/data-pipeline/CLAUDE.md` in your current project and prints the command to open it.
 
-### From the terminal (CLI)
+### From the terminal
 
 ```bash
 # In your project directory
@@ -80,17 +94,7 @@ your-project/
         └── CLAUDE.md      ← identity + Synapse self-registration instruction
 ```
 
-The scaffolded `CLAUDE.md` tells the agent to register itself automatically when the session starts:
-
-```markdown
-# Agent: data-pipeline
-
-Handles ETL jobs and knows about our Postgres schema.
-
-## Synapse
-You are a Synapse agent named `data-pipeline`. At the start of every session,
-before doing anything else, call the `register_agent` tool with name `data-pipeline`.
-```
+The agent registers itself automatically when the session starts — no extra steps.
 
 To start the agent:
 
@@ -98,7 +102,42 @@ To start the agent:
 cd agents/data-pipeline && claude
 ```
 
-The agent registers itself, the status line updates, and it's ready to receive messages.
+## Agent Naming
+
+Three ways to set the agent name, in order of precedence:
+
+**1. Environment variable** — most explicit, set before launching Claude:
+```bash
+SYNAPSE_AGENT_NAME=backend claude
+```
+
+**2. Self-registration via CLAUDE.md** — for created agents, the `CLAUDE.md` instructs the agent to register itself at session start. The status line updates once registration completes.
+
+**3. Folder name fallback** — if neither of the above is set, defaults to the current folder name (e.g. `~/projects/backend` becomes `backend`).
+
+## Tools
+
+Once connected, Claude has these tools:
+
+| Tool | Description |
+|------|-------------|
+| `send_message` | Send a message to another agent by name |
+| `check_messages` | Check your inbox for messages from other agents |
+| `list_agents` | See all registered agents and their status |
+| `register_agent` | Set or change the agent name for this session |
+| `create_agent` | Create a new agent with a `CLAUDE.md` in the current project |
+
+## CLI
+
+```bash
+agent-synapse setup                            # Configure Synapse (run once)
+agent-synapse create-agent <name> [desc]       # Create a new agent in ./agents/<name>/
+agent-synapse broker start                     # Start broker manually (usually auto-started)
+agent-synapse broker stop                      # Stop the broker
+agent-synapse broker status                    # Show broker and connected agents
+agent-synapse uninstall                        # Remove Synapse from Claude Code settings
+agent-synapse version                          # Show version
+```
 
 ## How It Works
 
@@ -116,43 +155,6 @@ Synapse supports two delivery modes:
 3. The message appears in Agent B's context as a `<channel>` tag — no polling needed
 
 In both modes, if the target agent is offline, messages are queued to disk and delivered on reconnect.
-
-## CLI
-
-```bash
-agent-synapse setup                            # Configure Synapse (run once)
-agent-synapse create-agent <name> [desc]       # Scaffold a new agent in ./agents/<name>/
-agent-synapse broker start                     # Start broker manually (usually auto-started)
-agent-synapse broker stop                      # Stop the broker
-agent-synapse broker status                    # Show broker and connected agents
-agent-synapse uninstall                        # Remove Synapse from Claude Code settings
-agent-synapse version                          # Show version
-```
-
-## Agent Naming
-
-Three ways to set the agent name, in order of precedence:
-
-**1. Environment variable** — most explicit, set before launching Claude:
-```bash
-SYNAPSE_AGENT_NAME=backend claude
-```
-
-**2. Self-registration via CLAUDE.md** — for scaffolded agents, the agent's `CLAUDE.md` instructs it to call `register_agent` automatically at session start. The status line updates once registration completes.
-
-**3. Folder name fallback** — if neither of the above is set, defaults to the current folder name (e.g. `~/projects/backend` becomes `backend`). The PostToolUse and UserPromptSubmit hooks use this to check for pending messages even before explicit registration.
-
-## Tools
-
-Once connected, Claude has these tools:
-
-| Tool | Description |
-|------|-------------|
-| `send_message` | Send a message to another agent by name |
-| `check_messages` | Retrieve pending messages from the queue |
-| `list_agents` | List all registered agents and their status |
-| `register_agent` | Set or change the agent name for this session |
-| `create_agent` | Scaffold a new agent with a `CLAUDE.md` in the current project |
 
 ## What `setup` does
 
@@ -176,23 +178,12 @@ Running `agent-synapse setup` configures three things:
 
 ## Security
 
-- Broker binds to `127.0.0.1` only (not exposed to network)
-- All authenticated requests require a token (generated during setup)
-- Data directory permissions: `700`, file permissions: `600`
-- Max message size: 100KB
-- Max queue depth: 100 messages per agent
-- Messages are drained from the queue after delivery
+- Broker binds to `127.0.0.1` only — not exposed to your network
+- All requests require an auth token generated during setup
+- Data directory and file permissions are locked down (`700` / `600`)
+- Max message size: 100KB, max queue depth: 100 messages per agent
 
-**Prompt injection note:** Messages from other agents enter Claude's context. While Claude Code's permission system prevents unauthorized tool use, be aware that message content is treated as context. Do not send secrets or credentials through Synapse.
-
-## Requirements
-
-- Node.js >= 18
-- Claude Code
-
-For real-time push (channel mode):
-- Claude Code v2.1.80+
-- claude.ai login (channels don't work with API key auth)
+**One thing to keep in mind:** messages from other agents enter Claude's context. Don't pass secrets or credentials through Synapse — treat agent messages like any other external input.
 
 ## License
 
