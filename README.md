@@ -3,6 +3,8 @@
 [![npm version](https://img.shields.io/npm/v/agent-synapse)](https://www.npmjs.com/package/agent-synapse)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+![Agent Synapse](assets/banner.svg)
+
 Cross-project messaging between Claude Code sessions via named agents.
 
 Agent Synapse lets multiple Claude Code sessions talk to each other — even across different project folders. Each session gets a codename. Agents send messages to each other by name, check their inbox, and see who's online.
