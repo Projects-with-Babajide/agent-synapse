@@ -24,7 +24,7 @@ export interface BrokerConfig {
   dataDir: string;
 }
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.1.1";
 export const DEFAULT_PORT = 3117;
 export const DEFAULT_HOST = "127.0.0.1";
 export const MAX_MESSAGE_SIZE = 100 * 1024; // 100KB
