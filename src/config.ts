@@ -190,23 +190,31 @@ export function installMcpServer(): { installed: boolean; message: string } {
 
   const mcpServers = (config.mcpServers ?? {}) as Record<string, unknown>;
 
-  if (mcpServers.synapse) {
-    return { installed: false, message: "MCP server already registered" };
-  }
-
   const channelPath = path.join(
     path.dirname(fileURLToPath(import.meta.url)),
     "channel.js"
   );
 
-  mcpServers.synapse = {
+  const entry = {
     type: "stdio",
     command: "node",
     args: [channelPath],
-    env: {
-      SYNAPSE_AGENT_NAME: "${SYNAPSE_AGENT_NAME}",
-    },
   };
+
+  // Migrate: remove legacy env field that caused unexpanded literals when
+  // SYNAPSE_AGENT_NAME wasn't set in the shell. Env vars are inherited naturally.
+  const existing = mcpServers.synapse as Record<string, unknown> | undefined;
+  if (existing) {
+    if (!existing.env) {
+      return { installed: false, message: "MCP server already registered" };
+    }
+    delete existing.env;
+    config.mcpServers = mcpServers;
+    fs.writeFileSync(CLAUDE_JSON_PATH, JSON.stringify(config, null, 2), { mode: 0o600 });
+    return { installed: true, message: "MCP server updated (removed legacy env field)" };
+  }
+
+  mcpServers.synapse = entry;
   config.mcpServers = mcpServers;
 
   fs.writeFileSync(CLAUDE_JSON_PATH, JSON.stringify(config, null, 2), {
@@ -221,8 +229,10 @@ export function installMcpServer(): { installed: boolean; message: string } {
 function buildStatusLineScript(existingCommand: string | null): string {
   // Resolve agent name: env var first, then session file (written by channel.ts on register_agent),
   // keyed by $PPID so multiple Claude sessions don't collide.
+  // Guard against unexpanded template literals (e.g. "${SYNAPSE_AGENT_NAME}") from legacy configs.
   const resolveAgent = `
   _synapse_agent="$SYNAPSE_AGENT_NAME"
+  case "$_synapse_agent" in '\${'* | SYNAPSE_AGENT_NAME) _synapse_agent="" ;; esac
   if [ -z "$_synapse_agent" ]; then
     _session_file="$HOME/.claude-synapse/session-$PPID.name"
     if [ -f "$_session_file" ]; then
