@@ -1,7 +1,7 @@
 {
   "name": "synapse",
   "description": "Cross-project messaging between Claude Code sessions via named agents",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": {
     "name": "Babajide Okusanya"
   },
