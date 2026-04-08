@@ -1,6 +1,6 @@
 # Roadmap
 
-Feedback from a 2-day, 5-agent Cerebro orchestration session (25+ PRs, 20+ tickets). Core model validated — gaps are visibility and convenience.
+Feedback from real-world multi-agent orchestration sessions. Core model validated — gaps are visibility and convenience.
 
 ## Near-term
 
@@ -47,7 +47,7 @@ Feedback from a 2-day, 5-agent Cerebro orchestration session (25+ PRs, 20+ ticke
 ### 5. Agent groups / availability routing
 **Problem:** "Send to whichever of builder/fixer is connected" requires manual fallback logic.
 
-**Fix:** Register agents into named groups (`cerebro-workers`). `send_message(to: "cerebro-workers")` routes to the first connected member, or queues for all if none are online.
+**Fix:** Register agents into named groups (`my-workers`). `send_message(to: "my-workers")` routes to the first connected member, or queues for all if none are online.
 
 ---
 
