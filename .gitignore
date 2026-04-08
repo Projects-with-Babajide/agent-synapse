@@ -2,6 +2,9 @@ node_modules/
 dist/
 *.js.map
 
+# Local Claude Code project settings (contains user-specific permissions and tokens)
+.claude/
+
 # Synapse data directory (local to each user)
 .claude-synapse/
 
