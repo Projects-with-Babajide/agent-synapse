@@ -56,5 +56,5 @@ SYNAPSE_AGENT_NAME=frontend claude
 ## Publishing
 
 - npm package name: `agent-synapse`
-- GitHub: Projects-with-Babajide/agent-synapse (private, planned open source)
+- GitHub: DisposableByDefault/agent-synapse (public)
 - Future: publish as Claude Code plugin to remove `--dangerously-load-development-channels` flag

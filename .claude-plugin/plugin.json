@@ -1,9 +1,13 @@
 {
-  "name": "synapse",
+  "name": "agent-synapse",
   "description": "Cross-project messaging between Claude Code sessions via named agents",
   "version": "0.1.1",
   "author": {
     "name": "Babajide Okusanya"
   },
+  "keywords": ["messaging", "multi-agent", "collaboration", "multi-session"],
+  "homepage": "https://github.com/DisposableByDefault/agent-synapse",
+  "repository": "https://github.com/DisposableByDefault/agent-synapse",
+  "license": "MIT",
   "mcpServers": "../.mcp.json"
 }
