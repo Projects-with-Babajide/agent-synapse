@@ -8,6 +8,7 @@ import {
   MAX_MESSAGE_SIZE,
   MAX_QUEUE_DEPTH,
   KEEPALIVE_INTERVAL_MS,
+  PRESENCE_TTL_MS,
 } from "./types.js";
 import type { SynapseMessage, SSEHint, Agent } from "./types.js";
 import { isValidAgentName } from "./config.js";
@@ -91,6 +92,13 @@ function validateToken(token: string | null, expectedToken: string): boolean {
   return token === expectedToken;
 }
 
+// Refresh an agent's last-seen marker. Called on any authenticated activity so
+// presence reflects reachability, not just whether an SSE socket is open.
+function touch(name: string): void {
+  const agent = agents.get(name);
+  if (agent) agent.last_seen = new Date().toISOString();
+}
+
 // --- SSE notification ---
 
 function notifyViaSSE(to: string, message: SynapseMessage): boolean {
@@ -150,7 +158,21 @@ export function startBroker(): void {
         json(res, 401, { error: "Invalid token" });
         return;
       }
-      const list = Array.from(agents.values());
+      // Derive presence: an agent is "connected" if it has a live SSE socket OR
+      // the broker has seen activity from it within PRESENCE_TTL_MS. The stored
+      // status flag only tracks the SSE socket, which drops on sleep/network blips
+      // even though the agent is still alive and reachable via the queue.
+      const now = Date.now();
+      const list = Array.from(agents.values()).map((a) => {
+        const hasLiveSSE = (sseClients.get(a.name)?.length ?? 0) > 0;
+        const lastSeenMs = Date.parse(a.last_seen);
+        const recentlySeen =
+          !Number.isNaN(lastSeenMs) && now - lastSeenMs < PRESENCE_TTL_MS;
+        return {
+          ...a,
+          status: hasLiveSSE || recentlySeen ? "connected" : "disconnected",
+        };
+      });
       json(res, 200, { agents: list });
       return;
     }
@@ -170,6 +192,7 @@ export function startBroker(): void {
         return;
       }
       const agentName = pathname.slice("/drain/".length);
+      touch(agentName);
       const messages = queues.get(agentName) ?? [];
       queues.delete(agentName);
       if (messages.length > 0) persistQueues();
@@ -202,14 +225,27 @@ export function startBroker(): void {
       if (!sseClients.has(agentName)) sseClients.set(agentName, []);
       sseClients.get(agentName)!.push(res);
 
-      // Flush queued messages
+      // Reflect live SSE as connected status (covers reconnect after drop)
+      const reconnectedAgent = agents.get(agentName);
+      if (reconnectedAgent) reconnectedAgent.status = "connected";
+      touch(agentName);
+
+      // Hint about any queued messages, but do NOT drain them here. SSE is a
+      // notify-only channel: the client parses every frame as an SSEHint and
+      // retrieves bodies via check_messages → /drain. Writing full message
+      // bodies here and deleting the queue (as this used to) silently dropped
+      // the content — the client never reads bodies off the stream, so the
+      // message became unreadable while the notification still fired.
       const pending = queues.get(agentName);
       if (pending && pending.length > 0) {
         for (const msg of pending) {
-          res.write(`data: ${JSON.stringify(msg)}\n\n`);
+          const hint: SSEHint = {
+            type: "message_available",
+            from: msg.from,
+            timestamp: msg.timestamp,
+          };
+          res.write(`data: ${JSON.stringify(hint)}\n\n`);
         }
-        queues.delete(agentName);
-        persistQueues();
       }
 
       // Keepalive
@@ -271,10 +307,12 @@ export function startBroker(): void {
           return;
         }
 
+        const nowIso = new Date().toISOString();
         agents.set(name, {
           name,
           status: "connected",
-          registered_at: new Date().toISOString(),
+          registered_at: nowIso,
+          last_seen: nowIso,
         });
 
         json(res, 200, { registered: name });
@@ -291,6 +329,9 @@ export function startBroker(): void {
           json(res, 400, { error: "Missing from, to, or content" });
           return;
         }
+
+        // A sending agent is provably alive — refresh its presence.
+        touch(from);
 
         if (Buffer.byteLength(content, "utf-8") > MAX_MESSAGE_SIZE) {
           json(res, 413, { error: "Message too large" });
@@ -325,6 +366,89 @@ export function startBroker(): void {
           notified,
           to,
         });
+        return;
+      }
+
+      // --- POST /unregister ---
+      if (pathname === "/unregister") {
+        const name = payload.name as string;
+        if (!name) {
+          json(res, 400, { error: "Missing agent name" });
+          return;
+        }
+
+        const wasRegistered = agents.delete(name);
+
+        const clients = sseClients.get(name);
+        if (clients) {
+          for (const client of clients) {
+            try { client.end(); } catch {}
+          }
+          sseClients.delete(name);
+        }
+
+        json(res, 200, { unregistered: name, wasRegistered });
+        return;
+      }
+
+      // --- POST /rename ---
+      if (pathname === "/rename") {
+        const from = payload.from as string | undefined;
+        const to = payload.to as string;
+
+        if (!to) {
+          json(res, 400, { error: "Missing new name" });
+          return;
+        }
+        if (!isValidAgentName(to)) {
+          json(res, 400, { error: "Invalid agent name. Use only letters, numbers, hyphens, and underscores (max 64 chars)." });
+          return;
+        }
+
+        const existing = from ? agents.get(from) : undefined;
+
+        if (existing && from && from !== to) {
+          // Migrate registration metadata
+          agents.delete(from);
+          agents.set(to, {
+            name: to,
+            status: existing.status,
+            registered_at: existing.registered_at,
+            last_seen: new Date().toISOString(),
+          });
+
+          // Move pending queue (preserves messages-in-flight across rename)
+          const oldQueue = queues.get(from);
+          if (oldQueue && oldQueue.length > 0) {
+            const newQueue = queues.get(to) ?? [];
+            queues.set(to, [...newQueue, ...oldQueue]);
+            queues.delete(from);
+            persistQueues();
+          }
+
+          // Close old SSE so the channel can reconnect under the new name
+          const clients = sseClients.get(from);
+          if (clients) {
+            for (const client of clients) {
+              try { client.end(); } catch {}
+            }
+            sseClients.delete(from);
+          }
+
+          json(res, 200, { renamed: { from, to }, registered: false });
+          return;
+        }
+
+        // No prior registration (or same name) — register fresh
+        const renameNowIso = new Date().toISOString();
+        agents.set(to, {
+          name: to,
+          status: "connected",
+          registered_at: renameNowIso,
+          last_seen: renameNowIso,
+        });
+
+        json(res, 200, { renamed: { from: from ?? null, to }, registered: true });
         return;
       }
     }

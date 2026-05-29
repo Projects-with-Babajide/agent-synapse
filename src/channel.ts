@@ -161,6 +161,13 @@ function connectSSE(
     if (destroyed) return;
 
     const config = getConfig();
+
+    // Idempotent re-register before opening SSE — heals broker restarts and
+    // refreshes the agents map after any drop/reconnect cycle.
+    brokerPost(config, "/register", { name: agentName }).catch(() => {
+      // Non-fatal: if broker is down, SSE attempt below will also fail and we'll retry
+    });
+
     const sseUrl = new URL(brokerUrl(config, `/stream/${agentName}`));
 
     const req = http.get(
@@ -339,6 +346,27 @@ async function main(): Promise<void> {
       },
     },
     {
+      name: "unregister_agent",
+      description:
+        "Remove this session's Synapse registration. The agent disappears from list_agents and stops receiving messages. Use when the session no longer wants to be reachable.",
+      inputSchema: { type: "object" as const, properties: {} },
+    },
+    {
+      name: "rename_agent",
+      description:
+        "Rename this session's Synapse identity to a new name. If the session is already registered, the registration metadata and any pending queued messages are migrated. If the session is not registered, this registers it with the new name (equivalent to register_agent).",
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          name: {
+            type: "string",
+            description: "New agent name",
+          },
+        },
+        required: ["name"],
+      },
+    },
+    {
       name: "send_message",
       description: "Send a message to another Claude Code agent",
       inputSchema: {
@@ -399,6 +427,57 @@ async function main(): Promise<void> {
       writeSessionName(newName);
       startSSE(newName);
       return textResult(`Registered as "${newName}". Now listening for messages.`);
+    },
+
+    async unregister_agent() {
+      const config = freshConfig();
+      const { status, data } = await brokerPost(config, "/unregister", {
+        name: agentName,
+      });
+
+      if (status !== 200) {
+        return textResult(`Failed to unregister: ${JSON.stringify(data)}`);
+      }
+
+      // Stop the local SSE so we don't auto-reconnect under the dropped name
+      if (sseHandle) {
+        sseHandle.destroy();
+        sseHandle = null;
+      }
+      cleanupSessionFile();
+
+      return textResult(
+        `Unregistered "${agentName}". This session is no longer reachable via Synapse. Call register_agent to come back online.`
+      );
+    },
+
+    async rename_agent(args) {
+      const newName = args.name;
+      if (!newName) {
+        return textResult("Error: name is required");
+      }
+
+      const config = freshConfig();
+      const { status, data } = await brokerPost(config, "/rename", {
+        from: agentName,
+        to: newName,
+      });
+
+      if (status !== 200) {
+        return textResult(`Failed to rename: ${JSON.stringify(data)}`);
+      }
+
+      const result = data as { renamed: { from: string | null; to: string }; registered: boolean };
+
+      agentName = newName;
+      writeSessionName(newName);
+      startSSE(newName);
+
+      return textResult(
+        result.registered
+          ? `Registered as "${newName}" (no prior registration found). Now listening for messages.`
+          : `Renamed from "${result.renamed.from}" to "${newName}". Pending messages and identity migrated.`
+      );
     },
 
     async send_message(args) {
