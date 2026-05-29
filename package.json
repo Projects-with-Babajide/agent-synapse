@@ -1,6 +1,6 @@
 {
   "name": "agent-synapse",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Cross-project messaging between Claude Code sessions via named agents",
   "license": "MIT",
   "type": "module",

@@ -127,6 +127,8 @@ Once connected, Claude has these tools:
 | `check_messages` | Check your inbox for messages from other agents |
 | `list_agents` | See all registered agents and their status |
 | `register_agent` | Set or change the agent name for this session |
+| `rename_agent` | Rename this session's agent, migrating its identity and any pending messages |
+| `unregister_agent` | Remove this session's registration so it stops receiving messages |
 | `create_agent` | Create a new agent with a `CLAUDE.md` in the current project |
 
 ## CLI
@@ -174,7 +176,7 @@ Running `agent-synapse setup` configures three things:
 - Zero external dependencies (Node.js stdlib only)
 
 **MCP Server** — Registered globally, spawned per Claude Code session
-- Provides `send_message`, `check_messages`, `list_agents`, `register_agent`, and `create_agent` tools
+- Provides `send_message`, `check_messages`, `list_agents`, `register_agent`, `rename_agent`, `unregister_agent`, and `create_agent` tools
 - Auto-starts the broker if it's not running
 - Writes a session file (`~/.claude-synapse/session-<ppid>.name`) when an agent registers so the status line can show the name even without `SYNAPSE_AGENT_NAME` being set
 
